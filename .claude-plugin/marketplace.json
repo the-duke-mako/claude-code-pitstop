@@ -1,11 +1,11 @@
 {
-  "name": "model-switcher",
+  "name": "pitstop",
   "owner": {
     "name": "the-duke-mako"
   },
   "plugins": [
     {
-      "name": "model-switcher",
+      "name": "pitstop",
       "source": "./"
     }
   ],

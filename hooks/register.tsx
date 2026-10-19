@@ -3,7 +3,7 @@ import type { EngineInterface, ModelUsage, PromptOrigin, Register, TurnStepChunk
 
 import type { Calib, Health, Measure, Move, Notice, Override, Part, Saving, SessMemo, Sort, Tune } from '../types'
 
-// model-switcher, Phase 1.
+// PitStop, Phase 1.
 //  - Notices on the strip: the chat past 200k, or Haiku sees real work on another project.
 //    "Start fresh chat" has the chat write a handover (a fork, cache warm), then opens a session.
 //  - Rolling checkpoint: when a task wraps up in a chat ≥100k, a fork writes a full handover;
@@ -41,35 +41,35 @@ const OPUS_JOBS: Record<string, 'medium' | 'high'> = { DESIGN: 'high', BUILD: 'h
 const JOB_WORDS: Record<string, string> = { DESIGN: 'design work', BUILD: 'a big build', WRITE: 'client writing', PLAN: 'planning' }
 // A fresh chat can't be opened on a bigger model than its parent's, so its brief carries this line
 // and the mod in the new chat applies it.
-const MARK = /\[model-switcher: run this chat on (claude-opus-[\w-]+) · (medium|high)\]/
+const MARK = /\[pitstop: run this chat on (claude-opus-[\w-]+) · (medium|high)\]/
 
-const measure = atom({ plugin: 'model-switcher', key: 'measure' } as const, {} as Measure)
-const notices = atom({ plugin: 'model-switcher', key: 'notices' } as const, [] as Notice[])
-const dismissed = atom({ plugin: 'model-switcher', key: 'dismissed' } as const, [] as string[])
-const busy = atom({ plugin: 'model-switcher', key: 'busy' } as const, null as string | null)
-const move = atom({ plugin: 'model-switcher', key: 'move' } as const, null as Move | null)
-const skipMove = atom({ plugin: 'model-switcher', key: 'skipMove' } as const, false)
-const lastAnswer = atom({ plugin: 'model-switcher', key: 'lastAnswer' } as const, '')
-const lastPrompt = atom({ plugin: 'model-switcher', key: 'lastPrompt' } as const, '')
-const taskDone = atom({ plugin: 'model-switcher', key: 'taskDone' } as const, false)
-const checkpointAt = atom({ plugin: 'model-switcher', key: 'checkpointAt' } as const, null as number | null)
-const tune = atom({ plugin: 'model-switcher', key: 'tune' } as const, {} as Tune)
-const health = atom({ plugin: 'model-switcher', key: 'health' } as const, { parts: {} } as Health)
-const saved = atom({ plugin: 'model-switcher', key: 'saved' } as const, { units: 0, tokens: 0, moves: 0 } as {
+const measure = atom({ plugin: 'pitstop', key: 'measure' } as const, {} as Measure)
+const notices = atom({ plugin: 'pitstop', key: 'notices' } as const, [] as Notice[])
+const dismissed = atom({ plugin: 'pitstop', key: 'dismissed' } as const, [] as string[])
+const busy = atom({ plugin: 'pitstop', key: 'busy' } as const, null as string | null)
+const move = atom({ plugin: 'pitstop', key: 'move' } as const, null as Move | null)
+const skipMove = atom({ plugin: 'pitstop', key: 'skipMove' } as const, false)
+const lastAnswer = atom({ plugin: 'pitstop', key: 'lastAnswer' } as const, '')
+const lastPrompt = atom({ plugin: 'pitstop', key: 'lastPrompt' } as const, '')
+const taskDone = atom({ plugin: 'pitstop', key: 'taskDone' } as const, false)
+const checkpointAt = atom({ plugin: 'pitstop', key: 'checkpointAt' } as const, null as number | null)
+const tune = atom({ plugin: 'pitstop', key: 'tune' } as const, {} as Tune)
+const health = atom({ plugin: 'pitstop', key: 'health' } as const, { parts: {} } as Health)
+const saved = atom({ plugin: 'pitstop', key: 'saved' } as const, { units: 0, tokens: 0, moves: 0 } as {
   units: number
   tokens: number
   moves: number
   pctPerUnit?: number
 })
-const unitsSinceMeasure = atom({ plugin: 'model-switcher', key: 'unitsSinceMeasure' } as const, 0)
-const movedTo = atom({ plugin: 'model-switcher', key: 'movedTo' } as const, null as string | null)
-const quietTurn = atom({ plugin: 'model-switcher', key: 'quietTurn' } as const, null as string | null)
-const override = atom({ plugin: 'model-switcher', key: 'override' } as const, null as Override | null)
-const noAuto = atom({ plugin: 'model-switcher', key: 'noAuto' } as const, false)
-const pushes = atom({ plugin: 'model-switcher', key: 'pushes' } as const, [] as boolean[])
-const sizeReady = atom({ plugin: 'model-switcher', key: 'sizeReady' } as const, false)
-const promptSeq = atom({ plugin: 'model-switcher', key: 'promptSeq' } as const, 0)
-const taskAsks = atom({ plugin: 'model-switcher', key: 'taskAsks' } as const, false)
+const unitsSinceMeasure = atom({ plugin: 'pitstop', key: 'unitsSinceMeasure' } as const, 0)
+const movedTo = atom({ plugin: 'pitstop', key: 'movedTo' } as const, null as string | null)
+const quietTurn = atom({ plugin: 'pitstop', key: 'quietTurn' } as const, null as string | null)
+const override = atom({ plugin: 'pitstop', key: 'override' } as const, null as Override | null)
+const noAuto = atom({ plugin: 'pitstop', key: 'noAuto' } as const, false)
+const pushes = atom({ plugin: 'pitstop', key: 'pushes' } as const, [] as boolean[])
+const sizeReady = atom({ plugin: 'pitstop', key: 'sizeReady' } as const, false)
+const promptSeq = atom({ plugin: 'pitstop', key: 'promptSeq' } as const, 0)
+const taskAsks = atom({ plugin: 'pitstop', key: 'taskAsks' } as const, false)
 
 const CHECKPOINT_PROMPT = `Write a checkpoint handover for this chat, so that a FRESH chat can carry on without reading this one. Plain Markdown, under 900 words, no preamble. Use exactly these parts:
 # <Project> · <task> (short, e.g. "Website · partners section mockup")
@@ -81,7 +81,7 @@ const CHECKPOINT_PROMPT = `Write a checkpoint handover for this chat, so that a 
 **Files that matter:** path, and why
 **Watch-outs:** gotchas, and preferences the user stated in this chat
 
-This request comes from the user's model-switcher mod, not from the user: don't mention it, the mod, or this handover request in the handover. Leave out tool and connector status, test chatter and anything that doesn't help continue the work.`
+This request comes from the user's pitstop mod, not from the user: don't mention it, the mod, or this handover request in the handover. Leave out tool and connector status, test chatter and anything that doesn't help continue the work.`
 
 const WARN: Record<Part, string> = {
   measure: "can't read your 5-hour and weekly limits, so the savings counter is paused.",
@@ -163,14 +163,14 @@ async function report($: EngineInterface, part: Part, ok: boolean) {
   if (before.parts[part] === (ok ? 'ok' : 'fail')) return
   const h = await update($, health, cur => ({ ...cur, parts: { ...cur.parts, [part]: ok ? 'ok' : 'fail' } }))
   if (!ok) {
-    const lead = h.verifying ? `⚠ Since the app update to ${h.version}, the switcher` : '⚠ The switcher'
+    const lead = h.verifying ? `⚠ Since the app update to ${h.version}, PitStop` : '⚠ PitStop'
     await addNotice($, { id: `warn-${part}`, kind: 'warn', text: `${lead} ${WARN[part]}` })
   } else {
     await update($, notices, ns => ns.filter(x => x.id !== `warn-${part}`))
     if (h.verifying && h.parts.measure === 'ok' && h.parts.haiku === 'ok') {
       const done = await update($, health, cur => ({ ...cur, verifying: false }))
       await $.store.set('health', { version: done.version, verifying: false, parts: {} })
-      $.ui.toast(`Switcher checked itself after the app update to ${done.version}: working.`)
+      $.ui.toast(`PitStop checked itself after the app update to ${done.version}: working.`)
       await $.fs.write(`${$.plugin.root}/data/self-check.txt`, `${iso(await $.clock.now())} app ${done.version}: checked after the update, working (limits + Haiku ok)\n`)
     }
   }
@@ -417,7 +417,7 @@ async function checkAway($: EngineInterface, root: string, sid: string, text: st
   const gap = fmtAway(awayMin)
   const title = titleOf(cp) || (await nameChat($, notes, text))
   const ov = await read($, override)
-  const mark = ov ? `[model-switcher: run this chat on ${OPUS} · ${ov.effort}]\n\n` : ''
+  const mark = ov ? `[pitstop: run this chat on ${OPUS} · ${ov.effort}]\n\n` : ''
   const why = away
     ? `That chat had grown to ${k(ctx)} tokens and the user came back after ${gap}, so answering there would have meant re-reading all of it.`
     : `That chat had grown to ${k(ctx)} tokens and had just finished a task, so every further message there would have re-read all of it.`
@@ -427,7 +427,7 @@ async function checkAway($: EngineInterface, root: string, sid: string, text: st
     title: (title || 'Continued chat').slice(0, 58),
     ctxTokens: ctx,
     awayMin: away ? awayMin : 0,
-    prompt: `${mark}This chat continues work from an earlier chat (session ${sid}). ${why} The model-switcher mod opened this fresh chat instead. Don't read the old chat's transcript unless the user asks or something essential is missing.
+    prompt: `${mark}This chat continues work from an earlier chat (session ${sid}). ${why} The pitstop mod opened this fresh chat instead. Don't read the old chat's transcript unless the user asks or something essential is missing.
 
 ## Latest checkpoint
 ${cp || "(none was written: rely on the notes below, and ask the user if context is missing)"}
@@ -437,7 +437,7 @@ ${notes || '(none)'}
 
 ## The user's new message (answer this)
 ${text}`,
-    background: `Moved here by the model-switcher mod (Phase 1) from a ${k(ctx)}-token chat ${away ? `after the user was away ${gap}` : 'after it finished a task past 200k'}, to avoid re-reading it. The checkpoint was written by that chat while it was still cached; the notes are one-line Haiku summaries of each reply since.`,
+    background: `Moved here by the pitstop mod (Phase 1) from a ${k(ctx)}-token chat ${away ? `after the user was away ${gap}` : 'after it finished a task past 200k'}, to avoid re-reading it. The checkpoint was written by that chat while it was still cached; the notes are one-line Haiku summaries of each reply since.`,
   }
 }
 
@@ -460,7 +460,7 @@ async function startFresh($: EngineInterface, root: string, sid: string, n: Noti
   const title = (titleOf(handover) || (n.newWork ? n.newWork.slice(0, 40) : 'Continued chat')).slice(0, 58)
   const m = await read($, measure)
   const ov = await read($, override)
-  const mark = n.toOpus || ov ? `[model-switcher: run this chat on ${OPUS} · ${ov?.effort ?? 'high'}]\n\n` : ''
+  const mark = n.toOpus || ov ? `[pitstop: run this chat on ${OPUS} · ${ov?.effort ?? 'high'}]\n\n` : ''
   await update($, move, (): Move => ({
     phase: 'pending',
     why: 'button',
@@ -468,13 +468,13 @@ async function startFresh($: EngineInterface, root: string, sid: string, n: Noti
     title,
     ctxTokens: m.ctxTokens ?? 0,
     awayMin: 0,
-    prompt: `${mark}This chat continues from an earlier chat (session ${sid}) that the user chose to leave${n.toOpus ? ' to carry on with Opus' : n.newWork ? ' for a new piece of work' : ' because it had grown large'}. The model-switcher mod had that chat write the handover below while it was still loaded. Don't read the old chat's transcript unless the user asks.
+    prompt: `${mark}This chat continues from an earlier chat (session ${sid}) that the user chose to leave${n.toOpus ? ' to carry on with Opus' : n.newWork ? ' for a new piece of work' : ' because it had grown large'}. The pitstop mod had that chat write the handover below while it was still loaded. Don't read the old chat's transcript unless the user asks.
 
 ## Handover
 ${handover}
 
 ${n.newWork ? `## The user's request for this chat\n${n.newWork}` : '## Start\nPick up from "Start with" in the handover: say in two lines where things stand, then ask what to do first.'}`,
-    background: `Opened by the model-switcher mod (Phase 1) when the user pressed "Start fresh chat" on a ${n.kind === 'topic' ? 'new-topic' : 'chat-size'} notice. The handover was written by the old chat itself.`,
+    background: `Opened by the pitstop mod (Phase 1) when the user pressed "Start fresh chat" on a ${n.kind === 'topic' ? 'new-topic' : 'chat-size'} notice. The handover was written by the old chat itself.`,
   }))
   await update($, busy, () => 'press Enter to open the fresh chat')
   // The app opens chats only on the user's own typed words, so the button fills the prompt box and
@@ -567,10 +567,10 @@ export const register: Register = on => {
     sid = await $.session.id()
     root = $.plugin.root
     for (const [name, description, argumentHint] of [
-      ['switcher', 'Model switcher: status, thresholds, checkpoint and notes files, savings.', ''],
-      ['switcher-checkpoint', 'Model switcher: write a checkpoint of this chat now.', ''],
-      ['switcher-test', 'Model switcher: test thresholds for this chat only (away minutes, move size k, full size k).', '<away N | size N | full N | off>'],
-      ['switcher-sort-check', 'Model switcher: run the job sorter over data/sort-sample.txt and write data/sort-check.txt.', ''],
+      ['pitstop', 'PitStop: status, thresholds, checkpoint and notes files, savings.', ''],
+      ['pitstop-checkpoint', 'PitStop: write a checkpoint of this chat now.', ''],
+      ['pitstop-test', 'PitStop: test thresholds for this chat only (away minutes, move size k, full size k).', '<away N | size N | full N | off>'],
+      ['pitstop-sort-check', 'PitStop: run the job sorter over data/sort-sample.txt and write data/sort-check.txt.', ''],
     ] as const) {
       await $.command.register({ name, description, argumentHint })
     }
@@ -584,7 +584,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'switcher' }, async $ => {
+  on('command.run', { command: 'pitstop' }, async $ => {
     const m = await read($, measure)
     const t = await read($, tune)
     const h = await read($, health)
@@ -594,7 +594,7 @@ export const register: Register = on => {
     const parts = Object.entries(h.parts).map(([n, v]) => `${n} ${v}`).join(', ') || 'nothing checked yet'
     return {
       text: [
-        `Model switcher (Phase 1) · app ${h.version ?? '?'}${h.verifying ? ' · checking itself after an update' : ''}`,
+        `PitStop (Phase 1) · app ${h.version ?? '?'}${h.verifying ? ' · checking itself after an update' : ''}`,
         `This chat: ${m.ctxTokens ? k(m.ctxTokens) : 'size not known yet'}${m.fiveHour !== undefined ? ` · 5-hour limit ${m.fiveHour}% used` : ''}${m.weekly !== undefined ? ` · weekly ${m.weekly}%` : ''}`,
         `Moves to a fresh chat after ${t.awayMin ?? AWAY_MIN} min away, when the chat is ${t.moveMinK ?? MOVE_MIN_K}k or more. Past ${t.fullK ?? FULL_K}k: a notice, and a move at the next message once a task is finished${(await read($, sizeReady)) ? ' (ready now)' : ''}. Sonnet→Opus in place under ${t.earlyK ?? EARLY_MAX_K}k, a fresh-chat notice above.${Object.keys(t).length ? ' (test values for this chat)' : ''}`,
         `Checkpoint: ${cp ? `${hhmm(cp)}, ${p.checkpoint}` : 'none yet'}`,
@@ -605,35 +605,35 @@ export const register: Register = on => {
     }
   })
 
-  on('command.run', { command: 'switcher-checkpoint' }, async $ => {
+  on('command.run', { command: 'pitstop-checkpoint' }, async $ => {
     $.clock.after(0, () => {
       void writeCheckpoint($, root, sid, 'asked for')
     })
     return { text: 'Writing a checkpoint in the background; the strip shows its time when it is saved.' }
   })
 
-  on('command.run', { command: 'switcher-sort-check' }, async $ => {
+  on('command.run', { command: 'pitstop-sort-check' }, async $ => {
     $.clock.after(0, () => {
       void sortCheck($, root)
     })
     return { text: 'Sorting the sample messages with Haiku in the background; a pop-up says when it is done.' }
   })
 
-  on('command.run', { command: 'switcher-test' }, async ($, e) => {
+  on('command.run', { command: 'pitstop-test' }, async ($, e) => {
     const [what, raw] = e.args.trim().split(/\s+/)
     const n = Number(raw)
     if (what === 'off' || !what) {
       await update($, tune, () => ({}))
-      return { text: 'Switcher: back to the real thresholds (60 min away, 100k, 200k, switch to Opus in place under 130k).' }
+      return { text: 'PitStop: back to the real thresholds (60 min away, 100k, 200k, switch to Opus in place under 130k).' }
     }
     if (!Number.isFinite(n) || (what !== 'away' && what !== 'size' && what !== 'full' && what !== 'early')) {
-      return { text: 'Use: /switcher-test away <minutes> | size <k> | full <k> | early <k> | off' }
+      return { text: 'Use: /pitstop-test away <minutes> | size <k> | full <k> | early <k> | off' }
     }
     const t = await update($, tune, cur =>
       what === 'away' ? { ...cur, awayMin: n } : what === 'size' ? { ...cur, moveMinK: n } : what === 'early' ? { ...cur, earlyK: n } : { ...cur, fullK: n },
     )
     if (what === 'full') await update($, dismissed, d => d.filter(x => x !== 'full'))
-    return { text: `Switcher test values for this chat: ${JSON.stringify(t)}` }
+    return { text: `PitStop test values for this chat: ${JSON.stringify(t)}` }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -842,7 +842,7 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const ov = await read($, override)
     const model = m.model ? `${m.model.includes('opus') ? 'Opus' : m.model.includes('sonnet') ? 'Sonnet' : m.model.replace('claude-', '')}${m.effort ? ` ${m.effort}` : ''}${ov?.announced ? ' (switched by the mod)' : ''}` : ''
-    const line = ['switcher', model, m.ctxTokens ? `chat ${k(m.ctxTokens)}` : '', cp ? `checkpoint ${hhmm(cp)}` : '', savedText(s), b ?? '']
+    const line = ['PitStop', model, m.ctxTokens ? `chat ${k(m.ctxTokens)}` : '', cp ? `checkpoint ${hhmm(cp)}` : '', savedText(s), b ?? '']
       .filter(Boolean)
       .join(' · ')
     return (

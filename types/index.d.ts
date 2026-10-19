@@ -40,7 +40,7 @@ export type Move = {
   noticeId?: string
 }
 
-// Test overrides for this chat only (/switcher-test).
+// Test overrides for this chat only (/pitstop-test).
 // What the sorter (Haiku) made of one message.
 export type Sort = { topic?: string; job?: string; sure: boolean; pushback: boolean; raw: string }
 // A model the mod runs this chat on instead of the app's (only ever Sonnet → Opus).
@@ -58,7 +58,7 @@ export type Calib = { pct: number; units: number }
 
 declare module 'claude-code' {
   interface PluginState {
-    'model-switcher': {
+    'pitstop': {
       measure: Measure
       notices: Notice[]
       dismissed: string[]

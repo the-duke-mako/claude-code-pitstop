@@ -1,6 +1,6 @@
-# Claude Code model switcher
+# PitStop for Claude Code
 
-A mod for the Claude Code desktop app that cuts how much of your usage goes on **re-reading long chats**.
+PitStop is a mod for the Claude Code desktop app that cuts how much of your usage goes on **re-reading long chats**.
 
 A long chat is expensive in two ways. Every message re-reads the whole thing, and if you come back after more than an hour the cached copy has expired, so the whole chat is written again. This mod keeps a running checkpoint of each chat and, when re-reading would be wasteful, opens a **fresh chat from the checkpoint** instead.
 
@@ -14,20 +14,20 @@ A long chat is expensive in two ways. Every message re-reads the whole thing, an
 - **A strip above the prompt** showing model, chat size, last checkpoint and a rough savings counter.
 - **Self-check** after an app update, so a changed API shows up as a warning instead of silently doing nothing.
 
-Commands: `/switcher` (status), `/switcher-checkpoint` (write one now), `/switcher-test away N | size N | full N | early N | off` (try other thresholds for one chat).
+Commands: `/pitstop` (status), `/pitstop-checkpoint` (write one now), `/pitstop-test away N | size N | full N | early N | off` (try other thresholds for one chat).
 
 ## Install
 
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install model-switcher --marketplace the-duke-mako/claude-code-model-switcher
+/plugin install pitstop --marketplace the-duke-mako/claude-code-pitstop
 ```
 
 or from a shell:
 
 ```
-claude plugin install model-switcher --marketplace the-duke-mako/claude-code-model-switcher
+claude plugin install pitstop --marketplace the-duke-mako/claude-code-pitstop
 ```
 
 To run it from a clone while you tinker, list the folder in `CLAUDE_CODE_PLUGIN_DIRS` (in the `env` block of `~/.claude/settings.json`) or start a session with `claude --plugin-dir <folder>`.
