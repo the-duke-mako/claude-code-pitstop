@@ -1,0 +1,6 @@
+# the mod writes per-chat checkpoints, notes and traces here; they hold your own chat content
+data/
+.claude-plugin/types/
+.DS_Store
+*.bak*
+*.log

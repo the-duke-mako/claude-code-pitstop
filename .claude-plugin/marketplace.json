@@ -1,0 +1,13 @@
+{
+  "name": "model-switcher",
+  "owner": {
+    "name": "the-duke-mako"
+  },
+  "plugins": [
+    {
+      "name": "model-switcher",
+      "source": "./"
+    }
+  ],
+  "description": "Claude Code mod that saves usage in long chats with checkpoints and fresh-chat moves."
+}

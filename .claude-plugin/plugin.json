@@ -1,0 +1,8 @@
+{
+  "name": "model-switcher",
+  "version": "0.1.0",
+  "description": "Saves usage in long Claude Code chats: checkpoints, a fresh chat instead of re-reading a big or cold one, new-topic notices, and Sonnet to Opus escalation for big jobs.",
+  "author": { "name": "the-duke-mako" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
