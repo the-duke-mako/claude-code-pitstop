@@ -6,8 +6,8 @@ A long chat is expensive in two ways. Every message re-reads the whole thing, an
 
 ## What it does
 
-- **Checkpoints.** When a task wraps up in a chat of 100k tokens or more, the chat writes a handover note while its cache is still warm. After every reply, Haiku adds a one-line note to a running log.
-- **Fresh chat after a break.** Come back to a chat of 100k+ after more than 60 minutes and the mod answers that turn itself (no request is sent to the model), opening a fresh chat from the latest checkpoint plus the notes since, with your message. The big chat is never re-read.
+- **Checkpoints.** When a task wraps up in a chat of 200k tokens or more, the chat writes a handover note while its cache is still warm. After every reply, Haiku adds a one-line note to a running log.
+- **Fresh chat after a break.** Come back to a chat of 100k+ after more than 60 minutes and the mod answers that turn itself (no request is sent to the model), opening a fresh chat from the latest checkpoint (if the chat reached 200k; otherwise just the running notes) plus the notes since, with your message. The big chat is never re-read.
 - **Fresh chat when a chat gets big.** Past 200k tokens you get a notice. Once the current task is finished, your next message opens a fresh chat the same way. Press **Dismiss** on the notice to keep the chat.
 - **New-topic notice.** Haiku checks each message. If it is real work on a different project, the strip offers **Start fresh chat**.
 - **Sonnet to Opus.** If a chat runs on Sonnet and Haiku is sure the job is design, a big build, client writing or planning, the mod switches that chat to Opus in place (**Undo** on the notice turns it off for that chat). Above 130k it offers a fresh chat on Opus instead, because a switch would re-read everything.

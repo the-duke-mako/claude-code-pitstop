@@ -6,7 +6,7 @@ import type { Calib, Health, Measure, Move, Notice, Override, Part, Saving, Sess
 // PitStop, Phase 1.
 //  - Notices on the strip: the chat past 200k, or Haiku sees real work on another project.
 //    "Start fresh chat" has the chat write a handover (a fork, cache warm), then opens a session.
-//  - Rolling checkpoint: when a task wraps up in a chat ≥100k, a fork writes a full handover;
+//  - Rolling checkpoint: when a task wraps up in a chat ≥200k, a fork writes a full handover;
 //    after every reply Haiku adds one line to the chat's notes.
 //  - After >1h away from a chat ≥100k, the next message is not sent to the model: the mod answers
 //    that turn itself, calling start_session with checkpoint + notes + the message, so the big
@@ -21,7 +21,8 @@ import type { Calib, Health, Measure, Move, Notice, Override, Part, Saving, Sess
 const AWAY_MIN = 60
 const MOVE_MIN_K = 100
 const FULL_K = 200
-const CHECKPOINT_MIN_K = 100
+// Checkpoints are written only from here up (= FULL_K); below it, a move after a break has the short notes only.
+const CHECKPOINT_MIN_K = 200
 // The new-chat tool is deferred, so the faked turn loads it first.
 const LOAD_TOOL_FIRST = true
 // Shared prefix a fresh chat reads from cache, and what it writes, measured in testing.
@@ -370,7 +371,7 @@ async function afterReply($: EngineInterface, root: string, sid: string, prompt:
   }
   if (replies >= 3 && !m.measureSeen) await report($, 'measure', false)
   await addNote($, root, sid, prompt, answer)
-  if (ctx >= (t.moveMinK ?? CHECKPOINT_MIN_K) * 1000 && (wasTaskDone || (await read($, checkpointAt)) === null)) {
+  if (ctx >= (t.fullK ?? CHECKPOINT_MIN_K) * 1000 && (wasTaskDone || (await read($, checkpointAt)) === null)) {
     const ok = await writeCheckpoint($, root, sid, wasTaskDone ? 'task finished' : 'first in a big chat')
     // Only if the user hasn't typed again while the checkpoint was being written: then it is current.
     if (ok && wasTaskDone && big && seq !== null && (await read($, promptSeq)) === seq) {
