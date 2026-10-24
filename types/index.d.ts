@@ -40,6 +40,10 @@ export type Move = {
   noticeId?: string
 }
 
+// A handover the mod wrote ahead of the button for one notice. `promptSeq` is how many messages
+// the user had sent when it was written: it is current only while they haven't sent another.
+export type PreHandover = { id: string; text: string; promptSeq: number; at: number }
+
 // Test overrides for this chat only (/pitstop-test).
 // What the sorter (Haiku) made of one message.
 export type Sort = { topic?: string; job?: string; sure: boolean; pushback: boolean; raw: string }
@@ -85,6 +89,9 @@ declare module 'claude-code' {
       promptSeq: number
       // the last wrap_up asked the user a question (the task waits on their answer)
       taskAsks: boolean
+      // the handover written ahead for the open notice, and how many were written in this chat
+      pre: PreHandover | null
+      preCount: number
     }
   }
 }

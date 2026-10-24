@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelUsage, PromptOrigin, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
-import type { Calib, Health, Measure, Move, Notice, Override, Part, Saving, SessMemo, Sort, Tune } from '../types'
+import type { Calib, Health, PreHandover, Measure, Move, Notice, Override, Part, Saving, SessMemo, Sort, Tune } from '../types'
 
 // PitStop, Phase 1.
 //  - Notices on the strip: the chat past 200k, or Haiku sees real work on another project.
@@ -21,10 +21,8 @@ import type { Calib, Health, Measure, Move, Notice, Override, Part, Saving, Sess
 const AWAY_MIN = 60
 const MOVE_MIN_K = 100
 const FULL_K = 200
-// Checkpoints are written only from here up (= FULL_K); below it, a move after a break has the short notes only.
+// Checkpoints are written only from here up (= FULL_K); below it a move after an hour away has the short notes only.
 const CHECKPOINT_MIN_K = 200
-// The new-chat tool is deferred, so the faked turn loads it first.
-const LOAD_TOOL_FIRST = true
 // Shared prefix a fresh chat reads from cache, and what it writes, measured in testing.
 const FRESH_READ = 44_000
 const FRESH_WRITE = 47_000
@@ -32,7 +30,20 @@ const FRESH_WRITE = 47_000
 const CALIB_MIN_UNITS = 3_000_000
 
 const START = 'mcp__ccd_session__start_session'
+const START_SERVER = 'ccd_session'
+const START_TOOL = 'start_session'
 const OPEN_TEXT = 'Open the fresh chat'
+// Handovers written ahead of the button: one when a notice appears, one after this long without a message
+// (never two in a row), then none: the button writes it and the user waits. Inside the 1-hour cache.
+const PRE_MAX = 2
+const GAP_MS = 10 * 60_000
+const CACHE_MS = 55 * 60_000
+const COPIED = 'copied'
+const OPENED = 'opened'
+const SAVED_ONLY = 'saved'
+// The app cuts a claude://code/new prompt at 14,336 characters; a longer brief goes by clipboard only.
+const LINK_MAX = 14_000
+const briefPath = (root: string, sid: string) => `${root}/data/${sid}.brief.md`
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
 // Sonnet → Opus: switched in place while the chat is under this size (a switch re-reads the chat),
 // above it only a "continue on Opus in a fresh chat" notice.
@@ -70,6 +81,8 @@ const noAuto = atom({ plugin: 'pitstop', key: 'noAuto' } as const, false)
 const pushes = atom({ plugin: 'pitstop', key: 'pushes' } as const, [] as boolean[])
 const sizeReady = atom({ plugin: 'pitstop', key: 'sizeReady' } as const, false)
 const promptSeq = atom({ plugin: 'pitstop', key: 'promptSeq' } as const, 0)
+const pre = atom({ plugin: 'pitstop', key: 'pre' } as const, null as PreHandover | null)
+const preCount = atom({ plugin: 'pitstop', key: 'preCount' } as const, 0)
 const taskAsks = atom({ plugin: 'pitstop', key: 'taskAsks' } as const, false)
 
 const CHECKPOINT_PROMPT = `Write a checkpoint handover for this chat, so that a FRESH chat can carry on without reading this one. Plain Markdown, under 900 words, no preamble. Use exactly these parts:
@@ -100,12 +113,6 @@ const hhmm = (ms: number) => {
 const fmtAway = (min: number) =>
   min < 120 ? `${min} min` : min < 48 * 60 ? `${Math.floor(min / 60)} h ${min % 60} min` : `${Math.round(min / 1440)} days`
 const titleOf = (md: string) => (/^#\s+(.+)$/m.exec(md)?.[1] ?? '').trim()
-const toolId = () => {
-  const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-  let s = 'toolu_01'
-  for (let i = 0; i < 22; i++) s += abc[Math.floor(Math.random() * abc.length)]
-  return s
-}
 
 // Relative cost of a request: input 1, cache write 1.25, cache read 0.1, output 5; Haiku half.
 function units(u: ModelUsage | null | undefined, model?: string): number {
@@ -250,7 +257,7 @@ async function addNote($: EngineInterface, root: string, sid: string, prompt: st
   await trace($, root, sid, `note: ${line}`)
 }
 
-const SORT_PROMPT = `You sort one message in a Claude Code work chat . Reply with exactly three lines:
+const SORT_PROMPT = `You sort one message in a Claude Code work chat. Reply with exactly three lines:
 TOPIC: SAME | SIDE | NEW: <Project> · <task>
 JOB: <TINY|EDIT|DESIGN|BUILD|PLAN|WRITE> <SURE|UNSURE>
 PUSHBACK: YES | NO
@@ -306,12 +313,14 @@ async function actOnSort($: EngineInterface, root: string, sid: string, srt: Sor
   const ps = await update($, pushes, p => [...p.slice(-5), srt.pushback])
   const misses = ps.filter(Boolean).length
   if (srt.topic && hadAnswer) {
-    await addNotice($, {
+    const topicNotice: Notice = {
       id: `topic-${await $.clock.now()}`,
       kind: 'topic',
       text: `This looks like new work: ${srt.topic}. A fresh chat keeps this one focused and costs less per message.`,
       newWork: text,
-    })
+    }
+    await addNotice($, topicNotice)
+    startPre($, root, sid, topicNotice)
   }
   const m = await read($, measure)
   const ov = await read($, override)
@@ -330,12 +339,14 @@ async function actOnSort($: EngineInterface, root: string, sid: string, srt: Sor
   }
   if ((await read($, dismissed)).includes('escalate') || (await read($, notices)).some(n => n.kind === 'escalate')) return
   await trace($, root, sid, `notice: continue on Opus (${why}, chat ${k(ctx)})`)
-  await addNotice($, {
+  const escNotice: Notice = {
     id: 'escalate',
     kind: 'escalate',
     toOpus: true,
     text: `This has turned into ${why} on Sonnet. Switching here would re-read all ${k(ctx)}; a fresh chat on Opus starts small.`,
-  })
+  }
+  await addNotice($, escNotice)
+  startPre($, root, sid, escNotice)
 }
 
 // Runs the sorter over a list of past messages (one per line) and writes what it picked.
@@ -438,25 +449,78 @@ ${notes || '(none)'}
 
 ## The user's new message (answer this)
 ${text}`,
-    background: `Moved here by the pitstop mod (Phase 1) from a ${k(ctx)}-token chat ${away ? `after the user was away ${gap}` : 'after it finished a task past 200k'}, to avoid re-reading it. The checkpoint was written by that chat while it was still cached; the notes are one-line Haiku summaries of each reply since.`,
+    background: `Moved here by the PitStop mod (Phase 1) from a ${k(ctx)}-token chat ${away ? `after the user was away ${gap}` : 'after it finished a task past 200k'}, to avoid re-reading it. The checkpoint was written by that chat while it was still cached; the notes are one-line Haiku summaries of each reply since.`,
   }
+}
+
+// What the chat is asked to write as the handover for a notice (the button and the write-ahead share it).
+function handoverAsk(n: Notice): string {
+  return n.newWork
+    ? `${CHECKPOINT_PROMPT}\n\nThe user is moving to a NEW chat for this request: "${n.newWork.slice(0, 1500)}". Write the handover for THAT request: keep only what from this chat helps with it (files, decisions, preferences). If nothing does, say so in one line.`
+    : `${CHECKPOINT_PROMPT}\n\nThe user is moving to a fresh chat${n.toOpus ? ' on a stronger model, because this work outgrew the current one' : ' because this one is large'}. End with a **Start with:** line saying what the fresh chat should do first.`
+}
+
+// Writes the handover for a notice ahead of the button, while the chat is still warm. At most PRE_MAX
+// per chat; skipped while the button is working.
+async function prewrite($: EngineInterface, root: string, sid: string, n: Notice): Promise<boolean> {
+  if ((await read($, preCount)) >= PRE_MAX || (await read($, busy))) return false
+  const seq = await read($, promptSeq)
+  const r = await $.model.fork({ prompt: handoverAsk(n) })
+  if (!r.isAnswered) return false
+  await overhead($, r.usage)
+  const at = await $.clock.now()
+  const count = await update($, preCount, x => x + 1)
+  await update($, pre, () => ({ id: n.id, text: r.text.trim(), promptSeq: seq, at }))
+  await trace($, root, sid, `handover written ahead for "${n.kind}" notice (${count} of ${PRE_MAX}), fork read ${r.usage.cache_read_input_tokens} from cache, out ${r.usage.output_tokens}`)
+  return true
+}
+
+// Handover #1: as soon as a topic or Opus notice appears (a size notice is covered by the checkpoint).
+function startPre($: EngineInterface, root: string, sid: string, n: Notice) {
+  $.clock.after(0, () => {
+    void read($, preCount).then(c => (c === 0 ? prewrite($, root, sid, n) : undefined))
+  })
+}
+
+// Handover #2: after a pause with no message, only if the user sent something since #1 and the cache is warm.
+async function gapWrite($: EngineInterface, root: string, sid: string, seq: number) {
+  if ((await read($, promptSeq)) !== seq) return
+  const cur = await read($, pre)
+  if (!cur || (await read($, preCount)) !== 1 || cur.promptSeq >= seq) return
+  const lastAt = (await read($, measure)).lastRealAt
+  if (lastAt === undefined || (await $.clock.now()) - lastAt > CACHE_MS) return
+  const n = (await read($, notices)).find(x => x.id === cur.id)
+  if (n) await prewrite($, root, sid, n)
 }
 
 // "Start fresh chat" on a notice: the chat writes its handover while still cached, then the mod
 // sends a prompt as the user, and turn.step answers that turn by opening the session.
 async function startFresh($: EngineInterface, root: string, sid: string, n: Notice) {
-  const ask = n.newWork
-    ? `${CHECKPOINT_PROMPT}\n\nThe user is moving to a NEW chat for this request: "${n.newWork.slice(0, 1500)}". Write the handover for THAT request: keep only what from this chat helps with it (files, decisions, preferences). If nothing does, say so in one line.`
-    : `${CHECKPOINT_PROMPT}\n\nThe user is moving to a fresh chat${n.toOpus ? ' on a stronger model, because this work outgrew the current one' : ' because this one is large'}. End with a **Start with:** line saying what the fresh chat should do first.`
-  const r = await $.model.fork({ prompt: ask })
-  if (!r.isAnswered) {
-    await update($, busy, () => null)
-    await report($, 'checkpoint', false)
-    $.ui.toast("Couldn't write the handover, so no fresh chat was opened.")
-    return
+  const m0 = await read($, measure)
+  const ready = await read($, pre)
+  const cpAt = await read($, checkpointAt)
+  let handover = ''
+  let source = ''
+  if (ready && ready.id === n.id && ready.promptSeq === (await read($, promptSeq))) {
+    handover = ready.text
+    source = 'written ahead'
+  } else if (!n.newWork && cpAt !== null && cpAt >= (m0.lastRealAt ?? 0)) {
+    handover = (await readText($, paths(root, sid).checkpoint)).replace(/^<!--[^\n]*-->\n?/, '').trim()
+    source = 'latest checkpoint'
   }
-  await overhead($, r.usage)
-  const handover = r.text.trim()
+  if (!handover) {
+    const r = await $.model.fork({ prompt: handoverAsk(n) })
+    if (!r.isAnswered) {
+      await update($, busy, () => null)
+      await report($, 'checkpoint', false)
+      $.ui.toast("Couldn't write the handover, so no fresh chat was opened.")
+      return
+    }
+    await overhead($, r.usage)
+    handover = r.text.trim()
+    source = 'written now'
+  }
+  await update($, pre, () => null)
   await $.fs.write(paths(root, sid).handover, `${handover}\n`)
   const title = (titleOf(handover) || (n.newWork ? n.newWork.slice(0, 40) : 'Continued chat')).slice(0, 58)
   const m = await read($, measure)
@@ -469,19 +533,19 @@ async function startFresh($: EngineInterface, root: string, sid: string, n: Noti
     title,
     ctxTokens: m.ctxTokens ?? 0,
     awayMin: 0,
-    prompt: `${mark}This chat continues from an earlier chat (session ${sid}) that the user chose to leave${n.toOpus ? ' to carry on with Opus' : n.newWork ? ' for a new piece of work' : ' because it had grown large'}. The pitstop mod had that chat write the handover below while it was still loaded. Don't read the old chat's transcript unless the user asks.
+    prompt: `${mark}This chat continues from an earlier chat (session ${sid}) that the user chose to leave${n.toOpus ? ' to carry on with Opus' : n.newWork ? ' for a new piece of work' : ' because it had grown large'}. The pitstop mod had that chat write the handover below while it was still loaded. Don't read the old chat's transcript unless the user asks.${n.newWork ? ' The request for this chat is at the end: use the handover only where it helps with that request.' : ''}
 
 ## Handover
 ${handover}
 
-${n.newWork ? `## The user's request for this chat\n${n.newWork}` : '## Start\nPick up from "Start with" in the handover: say in two lines where things stand, then ask what to do first.'}`,
-    background: `Opened by the pitstop mod (Phase 1) when the user pressed "Start fresh chat" on a ${n.kind === 'topic' ? 'new-topic' : 'chat-size'} notice. The handover was written by the old chat itself.`,
+${n.newWork ? `## The user's request for this chat\n${n.newWork}` : `## Start\n${source === 'latest checkpoint' ? 'Say in two lines where things stand, then ask what to do first.' : 'Pick up from "Start with" in the handover: say in two lines where things stand, then ask what to do first.'}`}`,
+    background: `Opened by the PitStop mod (Phase 1) when the user pressed "Start fresh chat" on a ${n.kind === 'topic' ? 'new-topic' : 'chat-size'} notice. The handover was written by the old chat itself.`,
   }))
   await update($, busy, () => 'press Enter to open the fresh chat')
   // The app opens chats only on the user's own typed words, so the button fills the prompt box and
   // their Enter starts the turn the mod answers itself.
   const filled = await $.prompt.fill({ text: OPEN_TEXT })
-  await trace($, root, sid, `button: handover written (${handover.length} chars), prompt box filled: ${JSON.stringify(filled).slice(0, 120)}`)
+  await trace($, root, sid, `button: handover ${source} (${handover.length} chars), prompt box filled: ${JSON.stringify(filled).slice(0, 120)}`)
   $.ui.toast(`Handover ready. Press Enter on “${OPEN_TEXT}” to open the fresh chat.`)
 }
 
@@ -507,33 +571,79 @@ async function pressFresh($: EngineInterface, root: string, sid: string, n: Noti
   })
 }
 
-async function* fakeStep($: EngineInterface, e: TurnStepInput): AsyncGenerator<TurnStepChunk, TurnStepResult> {
-  const m = await read($, move)
-  const plan = LOAD_TOOL_FIRST ? ['load', 'start', 'say'] : ['start', 'say']
-  const what = plan[Math.min(e.index, plan.length - 1)]
-  if (m && !m.result && (what === 'load' || what === 'start')) {
-    const name = what === 'load' ? 'ToolSearch' : START
-    const input =
-      what === 'load'
-        ? { query: `select:${START}`, max_results: 1 }
-        : { initiation: 'user_asked', title: m.title, context: 'fresh', prompt: m.prompt, background: m.background }
-    const lead =
-      e.index > 0
-        ? ''
-        : m.why === 'away'
-          ? `You were away ${fmtAway(m.awayMin)}, so I'm opening a fresh chat instead of re-reading this one…`
-          : m.why === 'size'
-            ? `This chat is ${k(m.ctxTokens)} and the last task is finished, so I'm opening a fresh chat from its checkpoint…`
-            : 'Opening a fresh chat from the handover…'
-    let at = 0
-    if (lead) {
-      yield { kind: 'text', index: 0, text: lead }
-      at = 1
+// A mod can't open a chat itself since app 2.1.304 (auto mode's classifier refuses a start_session nobody
+// asked for; outside auto mode the tool itself wants the user's own typed words). Instead the app's own
+// link claude://code/new?q=… opens a new Code chat with the brief already in the prompt box, unsent, and
+// the user presses Enter: that makes it their own message, which is all the app asks. The brief is also
+// copied to the clipboard and saved to a file as a backup.
+async function hostSessionId($: EngineInterface): Promise<string> {
+  try {
+    const r = await $.process.run(['/usr/bin/printenv', 'CLAUDE_CODE_HOST_SESSION_ID'], { timeoutMs: 5_000 })
+    const id = r.stdout.trim()
+    return /^local_[\w-]+$/.test(id) ? id : ''
+  } catch {
+    return ''
+  }
+}
+
+// A mod's own call to the app's sidebar tools is blocked by auto mode (no request asked for it), so the
+// brief asks the new chat to file itself next to the old one: the user sends that brief, so it is their ask.
+// A chat can't be nested under another after the fact; a shared sidebar group is the nearest thing.
+function sidebarAsk(oldId: string, title: string): string {
+  if (!oldId) return ''
+  const project = (title.split(' · ')[0] ?? '').trim() || 'Continued chats'
+  return `\n\n## Sidebar (do this first, then answer)\nFile this chat next to the chat it came from (${oldId}): if that chat is already in a sidebar group (get_session), move this chat ("self") into the same group; otherwise use the sidebar group named "${project}" (list_groups, create it if it is missing) and move both chats into it with move_sessions. Say so in one short line, nothing more.`
+}
+
+async function openLink($: EngineInterface, text: string): Promise<boolean> {
+  if (text.length > LINK_MAX) return false
+  try {
+    // No `folder=`: a link that names a folder counts as "external" and the app asks "Trust this
+    // workspace?" every time. Without it the new chat opens in the last-used folder.
+    const url = `claude://code/new?q=${encodeURIComponent(text)}`
+    const r = await $.process.run(['/usr/bin/open', url], { timeoutMs: 10_000 })
+    return r.exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+async function openFresh($: EngineInterface, root: string, sid: string, m: Move): Promise<{ ok: boolean; detail: string }> {
+  const file = briefPath(root, sid)
+  const oldId = await hostSessionId($)
+  const text = m.prompt + sidebarAsk(oldId, m.title)
+  let res: { ok: boolean; detail: string }
+  try {
+    await $.fs.write(file, `${text}\n`)
+    let copied = false
+    try {
+      copied = (await $.ui.copy({ text })).isCopied
+    } catch {
+      copied = false
     }
-    yield { kind: 'tool', index: at, id: toolId(), name }
-    yield { kind: 'input', index: at, json: JSON.stringify(input) }
-    yield { kind: 'stop', stopReason: 'tool_use', usage: null }
-    return { turnId: e.turnId, index: e.index, answer: lead, toolUses: [{ name, input }], stopReason: 'tool_use', usage: null }
+    const opened = await openLink($, text)
+    res = { ok: true, detail: opened ? OPENED : copied ? COPIED : `${SAVED_ONLY} ${file}` }
+  } catch (err) {
+    res = { ok: false, detail: String(err).slice(0, 400) }
+  }
+  await update($, move, x => x && { ...x, result: res })
+  await report($, 'move', res.ok)
+  await trace($, root, sid, `brief for a fresh chat (${text.length} chars, old chat ${oldId || 'id unknown'}) ${res.ok ? 'ok' : 'FAILED'}: ${res.detail.slice(0, 300)}`)
+  return res
+}
+
+async function* fakeStep($: EngineInterface, e: TurnStepInput, root: string, sid: string): AsyncGenerator<TurnStepChunk, TurnStepResult> {
+  const m = await read($, move)
+  let lead = ''
+  if (m && !m.result) {
+    lead =
+      m.why === 'away'
+        ? `You were away ${fmtAway(m.awayMin)}, so I'm opening a fresh chat instead of re-reading this one…\n\n`
+        : m.why === 'size'
+          ? `This chat is ${k(m.ctxTokens)} and the last task is finished, so I'm opening a fresh chat from its checkpoint…\n\n`
+          : 'Opening a fresh chat from the handover…\n\n'
+    yield { kind: 'text', index: 0, text: lead }
+    m.result = await openFresh($, root, sid, m)
   }
   const s = await read($, saved)
   const res = m?.result
@@ -544,25 +654,37 @@ async function* fakeStep($: EngineInterface, e: TurnStepInput): AsyncGenerator<T
       m?.why === 'button'
         ? `I couldn't open a fresh chat${why}. The handover is saved; you can carry on here.`
         : `I couldn't open a fresh chat${why}. Nothing is lost: send your message again and it will be answered in this chat.`
-  } else if (m.why === 'away') {
-    const cost = avoidedUnits(m.ctxTokens, m.prompt.length)
-    const size = s.pctPerUnit !== undefined ? `≈${(cost * s.pctPerUnit).toFixed(1)}% of your 5-hour limit` : `≈${k(cost)} tokens of re-reading`
-    const costNote = cost >= 5000 ? ` (${size})` : ''
-    text = `You were away ${fmtAway(m.awayMin)}. This chat is ${k(m.ctxTokens)}, and its stored copy expires after an hour, so answering here would have meant re-reading all of it${costNote}. I opened a fresh chat with the latest checkpoint and your message instead: look for “${m.title}” in the sidebar. This chat is left as it was.`
-  } else if (m.why === 'size') {
-    text = `This chat is ${k(m.ctxTokens)} and the last task was finished, so every further message here would re-read all of it. I opened a fresh chat with the checkpoint and your message instead: look for “${m.title}” in the sidebar. To carry on here instead, type your message here again.`
   } else {
-    text = `Opened a fresh chat with the handover: “${m.title}” in the sidebar. This chat is left as it was.`
+    const how =
+      res.detail === OPENED
+        ? 'I opened a fresh chat with it already typed in (it is on your clipboard too)'
+        : res.detail === COPIED
+          ? 'I copied it to your clipboard'
+          : `I couldn't reach the clipboard, so it is saved in ${briefPath(root, sid)}`
+    const step =
+      res.detail === OPENED
+        ? 'Press Enter there to send it. It also files both chats together in the sidebar'
+        : res.detail === COPIED
+          ? 'Click New and paste (⌘V), then send'
+          : 'Click New, paste it from that file, then send'
+    const lead2 =
+      m.why === 'away'
+        ? `You were away ${fmtAway(m.awayMin)}. This chat is ${k(m.ctxTokens)}, and its stored copy expires after an hour, so answering here would have meant re-reading all of it.`
+        : m.why === 'size'
+          ? `This chat is ${k(m.ctxTokens)} and the last task was finished, so every further message here would re-read all of it.`
+          : 'The handover for the fresh chat is ready.'
+    text = `${lead2} I built the brief for a fresh chat (“${m.title}”: the latest checkpoint, the notes since, and ${m.why === 'button' ? 'the handover' : 'your message'}); ${how}. ${step}. This chat is left as it was${m.why === 'button' ? '' : '; to answer here instead, type your message again'}.`
   }
   yield { kind: 'text', index: 0, text }
   yield { kind: 'stop', stopReason: 'end_turn', usage: null }
-  return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn', usage: null }
+  return { turnId: e.turnId, index: e.index, answer: lead + text, toolUses: [], stopReason: 'end_turn', usage: null }
 }
 
 export const register: Register = on => {
   let sid = 'unknown'
   let root = ''
   let replies = 0
+  let gapTimer: { cancel: () => void } | undefined
 
   on('session.start', async ($, e, next) => {
     sid = await $.session.id()
@@ -611,6 +733,48 @@ export const register: Register = on => {
       void writeCheckpoint($, root, sid, 'asked for')
     })
     return { text: 'Writing a checkpoint in the background; the strip shows its time when it is saved.' }
+  })
+
+  // /pitstop-copy [message]: the same brief a move builds, on the clipboard on demand. Works any time,
+  // so a lost clipboard or a chat left by hand costs nothing. The message after the command, if any,
+  // goes in as "the user's new message".
+  on('command.run', { command: 'pitstop-copy' }, async ($, e) => {
+    const p = paths(root, sid)
+    const cp = (await readText($, p.checkpoint)).trim()
+    const cpTime = /<!-- checkpoint (\S+)/.exec(cp)?.[1] ?? ''
+    const notes = (await readText($, p.notes))
+      .split('\n')
+      .filter(l => l.startsWith('- ') && l.slice(2, 21) > cpTime)
+      .slice(-40)
+      .join('\n')
+    if (!cp && !notes) return { text: 'PitStop has no checkpoint or notes for this chat yet, so there is nothing to carry over. /pitstop-checkpoint writes one.' }
+    const m = await read($, measure)
+    const said = e.args.trim()
+    const brief = `This chat continues work from an earlier chat (session ${sid}${m.ctxTokens ? `, ${k(m.ctxTokens)} tokens` : ''}). The user moved to a fresh chat instead of re-reading it. Don't read the old chat's transcript unless the user asks or something essential is missing.
+
+## Latest checkpoint
+${cp || '(none was written: rely on the notes below, and ask the user if context is missing)'}
+
+## Notes since the checkpoint
+${notes || '(none)'}
+
+${said ? `## The user's new message (answer this)\n${said}` : '## Start\nSay in two lines where things stand, then ask what to do first.'}
+`
+    await $.fs.write(briefPath(root, sid), brief)
+    let copied = false
+    try {
+      copied = (await $.ui.copy({ text: brief })).isCopied
+    } catch {
+      copied = false
+    }
+    await trace($, root, sid, `/pitstop-copy: brief of ${brief.length} chars, ${copied ? 'on the clipboard' : 'file only'}`)
+    const cpAt = await read($, checkpointAt)
+    const cpNote = cp ? (cpAt ? `checkpoint from ${hhmm(cpAt)}` : 'latest checkpoint') : 'no checkpoint, notes only'
+    return {
+      text: copied
+        ? `Brief copied (${k(Math.round(brief.length / 4))} tokens, ${cpNote}). Press ⌘N, paste with ⌘V, send.`
+        : `Couldn't reach the clipboard. The brief is saved in ${briefPath(root, sid)}: open it, copy it, press ⌘N and paste.`,
+    }
   })
 
   on('command.run', { command: 'pitstop-sort-check' }, async $ => {
@@ -736,7 +900,7 @@ export const register: Register = on => {
       if (m && (m.phase === 'pending' || m.phase === e.turnId)) {
         if (m.phase === 'pending') await update($, move, x => x && { ...x, phase: e.turnId })
         await trace($, root, sid, `move: answering step ${e.index} myself (no request sent)`)
-        return yield* fakeStep($, e)
+        return yield* fakeStep($, e, root, sid)
       }
     }
     let asked = e
@@ -779,8 +943,7 @@ export const register: Register = on => {
       await update($, move, () => null)
       await update($, busy, () => null)
       if (m.result?.ok) {
-        if (m.why === 'away') await addSaving($, avoidedUnits(m.ctxTokens, m.prompt.length), m.ctxTokens)
-        await update($, movedTo, () => m.title)
+        // The user sends the brief in the new chat themselves, so no hand-back line and no saving counted.
         if (m.noticeId) await update($, notices, ns => ns.filter(x => x.id !== m.noticeId))
         if (m.why === 'size') await update($, notices, ns => ns.filter(x => x.kind !== 'full'))
       } else {
@@ -791,6 +954,11 @@ export const register: Register = on => {
     await update($, unitsSinceMeasure, x => x + units(e.usage, e.usage?.model))
     if (e.reason !== 'answer') return next(e)
     replies += 1
+    gapTimer?.cancel()
+    const gapSeq = await read($, promptSeq)
+    gapTimer = $.clock.after(GAP_MS, () => {
+      void gapWrite($, root, sid, gapSeq)
+    })
     const prompt = await read($, lastPrompt)
     const wasTaskDone = await read($, taskDone)
     await update($, taskDone, () => false)
